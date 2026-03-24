@@ -1,13 +1,13 @@
-import { useState } from "react";
+import { useState, lazy, Suspense } from "react";
 import { useAuth } from "./AuthContext.jsx";
 import LoginPage from "./LoginPage.jsx";
 import App from "./App.jsx";
-import AdminPanel from "./AdminPanel.jsx";
+import { LoadingSkeleton } from "./components.jsx";
 
-// Roteamento protegido baseado em estado (sem React Router)
-// - Sem sessão         → Login
-// - Sessão + admin + page="admin" → AdminPanel
-// - Sessão (qualquer perfil)       → Dashboard
+// AdminPanel é carregado apenas quando um admin navega para ele.
+// Viewers nunca fazem download deste chunk.
+const AdminPanel = lazy(() => import("./AdminPanel.jsx"));
+
 export default function RootApp() {
   const { session } = useAuth();
   const [page, setPage] = useState("dashboard");
@@ -15,7 +15,11 @@ export default function RootApp() {
   if (!session) return <LoginPage />;
 
   if (page === "admin" && session.role === "admin") {
-    return <AdminPanel onBack={() => setPage("dashboard")} />;
+    return (
+      <Suspense fallback={<LoadingSkeleton />}>
+        <AdminPanel onBack={() => setPage("dashboard")} />
+      </Suspense>
+    );
   }
 
   return (

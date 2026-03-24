@@ -33,10 +33,6 @@ export default function LoginPage() {
         padding: "0 16px",
       }}
     >
-      <link
-        href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap"
-        rel="stylesheet"
-      />
 
       <div
         style={{
@@ -156,10 +152,6 @@ export default function LoginPage() {
         </form>
       </div>
 
-      <style>{`
-        @keyframes fadeIn { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
-        *{box-sizing:border-box;margin:0;padding:0}
-      `}</style>
     </div>
   );
 }

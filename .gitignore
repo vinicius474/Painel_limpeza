@@ -11,6 +11,9 @@ dist
 # Dados persistidos pelo servidor (contêm hashes e IPs)
 server/data/*.json
 
+# Logs do PM2
+logs/
+
 # Certificados SSL
 *.pem
 *.key

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useAuth } from "./AuthContext.jsx";
 
 // ─── Configuração visual dos tipos de log ─────────────────────────────────────
@@ -75,11 +75,13 @@ export default function AdminPanel({ onBack }) {
   const [logs, setLogs] = useState([]);
   const [logsLoading, setLogsLoading] = useState(false);
   const [logFilter, setLogFilter] = useState("ALL");
+  const [logDateFilter, setLogDateFilter] = useState("ALL");
   const [logSearch, setLogSearch] = useState("");
 
   // ── Usuários ───────────────────────────────────────────────────────────────
   const [users, setUsers] = useState([]);
   const [usersLoading, setUsersLoading] = useState(false);
+  const [usersError, setUsersError] = useState("");
 
   // ── Criar usuário ──────────────────────────────────────────────────────────
   const [newUsername, setNewUsername] = useState("");
@@ -90,6 +92,11 @@ export default function AdminPanel({ onBack }) {
   const [createError, setCreateError] = useState("");
   const [createdUser, setCreatedUser] = useState(null);
   const [copied, setCopied] = useState(false);
+  const [deleteConfirm, setDeleteConfirm] = useState(null); // username pendente de confirmação
+
+  // ── Cleanup de timeout do "Copiado" para evitar setState em componente desmontado
+  const copyTimeoutRef = useRef(null);
+  useEffect(() => () => clearTimeout(copyTimeoutRef.current), []);
 
   // ── Fetch autenticado ──────────────────────────────────────────────────────
   const authFetch = useCallback((url, opts = {}) =>
@@ -127,26 +134,39 @@ export default function AdminPanel({ onBack }) {
   useEffect(() => {
     if (tab === "logs")  loadLogs();
     if (tab === "users") loadUsers();
-  }, [tab]); // eslint-disable-line
+  }, [tab, loadLogs, loadUsers]);
 
-  // ── Contadores por tipo (para os cards) ────────────────────────────────────
+  // ── Contadores por tipo (para os cards) — O(n) com passagem única ────────
   const logCounts = useMemo(() => {
     const counts = { ALL: logs.length };
-    LOG_TYPES_ORDER.forEach((t) => { counts[t] = logs.filter((l) => l.type === t).length; });
+    LOG_TYPES_ORDER.forEach((t) => (counts[t] = 0));
+    for (const l of logs) {
+      if (counts[l.type] !== undefined) counts[l.type]++;
+    }
     return counts;
   }, [logs]);
 
-  // ── Logs filtrados ─────────────────────────────────────────────────────────
+  // ── Logs filtrados (tipo + período + busca) ────────────────────────────────
   const filteredLogs = useMemo(() => {
     const q = logSearch.trim().toLowerCase();
-    return logs
-      .filter((l) => logFilter === "ALL" || l.type === logFilter)
-      .filter((l) => !q ||
-        l.username.toLowerCase().includes(q) ||
-        l.ip.includes(q) ||
-        (l.detail || "").toLowerCase().includes(q)
-      );
-  }, [logs, logFilter, logSearch]);
+    const now = Date.now();
+    const periodMs = { TODAY: 86_400_000, "7D": 7 * 86_400_000, "30D": 30 * 86_400_000 };
+
+    return logs.filter((l) => {
+      if (logFilter !== "ALL" && l.type !== logFilter) return false;
+      if (logDateFilter !== "ALL") {
+        if (now - new Date(l.ts).getTime() > periodMs[logDateFilter]) return false;
+      }
+      if (q) {
+        return (
+          l.username.toLowerCase().includes(q) ||
+          l.ip.includes(q) ||
+          (l.detail || "").toLowerCase().includes(q)
+        );
+      }
+      return true;
+    });
+  }, [logs, logFilter, logDateFilter, logSearch]);
 
   // ── Criar usuário ──────────────────────────────────────────────────────────
   async function handleCreate(e) {
@@ -167,17 +187,24 @@ export default function AdminPanel({ onBack }) {
   }
 
   async function handleDelete(username) {
-    if (!window.confirm(`Excluir o usuário "${username}"? Esta ação não pode ser desfeita.`)) return;
     try {
       const res = await authFetch(`/admin/users/${encodeURIComponent(username)}`, { method: "DELETE" });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
+      setDeleteConfirm(null);
       loadUsers();
-    } catch (err) { window.alert(err.message); }
+    } catch (err) {
+      setDeleteConfirm(null);
+      setUsersError(err.message);
+    }
   }
 
   function copyToClipboard(text) {
-    navigator.clipboard.writeText(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); });
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      clearTimeout(copyTimeoutRef.current);
+      copyTimeoutRef.current = setTimeout(() => setCopied(false), 2000);
+    });
   }
 
   const pwStrength = passwordStrength(newPassword);
@@ -188,11 +215,6 @@ export default function AdminPanel({ onBack }) {
       minHeight: "100vh", background: "#080810", color: "#d0d8e4",
       fontFamily: "'IBM Plex Sans','Segoe UI',system-ui,sans-serif",
     }}>
-      <link
-        href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap"
-        rel="stylesheet"
-      />
-
       {/* ── Header ── */}
       <header style={{
         borderBottom: "1px solid rgba(255,255,255,0.05)",
@@ -250,134 +272,180 @@ export default function AdminPanel({ onBack }) {
         {tab === "logs" && (
           <div style={{ animation: "fadeIn 0.2s ease" }}>
 
-            {/* ── Cards de resumo (clicáveis para filtrar) ── */}
-            <div style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(5, 1fr)",
-              gap: 10, marginBottom: 18,
-            }}>
+            {/* ── Métricas (somente leitura) ── */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 10, marginBottom: 16 }}>
               {LOG_TYPES_ORDER.map((type) => {
-                const cfg     = LOG_CFG[type];
-                const active  = logFilter === type;
-                const count   = logCounts[type] || 0;
+                const cfg   = LOG_CFG[type];
+                const count = logCounts[type] || 0;
                 return (
-                  <div
-                    key={type}
-                    onClick={() => { setLogFilter(active ? "ALL" : type); setLogSearch(""); }}
-                    title={active ? "Clique para ver todos" : `Filtrar: ${cfg.label}`}
-                    style={{
-                      cursor: "pointer",
-                      background: active ? cfg.bg : "rgba(255,255,255,0.015)",
-                      border: `1px solid ${active ? cfg.color + "40" : "rgba(255,255,255,0.05)"}`,
-                      borderRadius: 12, padding: "14px 16px",
-                      transition: "all 0.2s",
-                      position: "relative",
-                      overflow: "hidden",
-                    }}
-                  >
-                    {/* Barra de destaque no topo */}
-                    {active && (
-                      <div style={{
-                        position: "absolute", top: 0, left: 0, right: 0,
-                        height: 2, background: cfg.color,
-                      }} />
-                    )}
+                  <div key={type} style={{
+                    background: "rgba(255,255,255,0.015)",
+                    border: "1px solid rgba(255,255,255,0.05)",
+                    borderTop: `2px solid ${cfg.color}50`,
+                    borderRadius: 12, padding: "13px 15px",
+                  }}>
                     <div style={{
-                      fontSize: 9, color: active ? cfg.color : "#5b6b80",
-                      fontWeight: 700, textTransform: "uppercase",
-                      letterSpacing: "0.08em", marginBottom: 10,
-                      display: "flex", alignItems: "center", gap: 5,
+                      fontSize: 9, color: "#5b6b80", fontWeight: 700,
+                      textTransform: "uppercase", letterSpacing: "0.08em",
+                      marginBottom: 8, display: "flex", alignItems: "center", gap: 5,
                     }}>
-                      <span style={{
-                        width: 16, height: 16, borderRadius: "50%",
-                        background: active ? cfg.bg : "rgba(255,255,255,0.04)",
-                        color: cfg.color,
-                        display: "inline-flex", alignItems: "center",
-                        justifyContent: "center", fontSize: 10,
-                      }}>{cfg.icon}</span>
+                      <span style={{ color: cfg.color }}>{cfg.icon}</span>
                       {cfg.label}
                     </div>
                     <div style={{
-                      fontSize: 32, fontWeight: 700, lineHeight: 1,
+                      fontSize: 28, fontWeight: 700, lineHeight: 1,
                       fontFamily: "'IBM Plex Mono', monospace",
-                      color: active ? cfg.color : (count > 0 ? "#f0f4f8" : "#3d4a5c"),
+                      color: count > 0 ? "#f0f4f8" : "#3d4a5c",
                     }}>
                       {count}
                     </div>
-                    {active && (
-                      <div style={{ fontSize: 9, color: cfg.color + "aa", marginTop: 4 }}>
-                        filtro ativo · clique para limpar
-                      </div>
-                    )}
                   </div>
                 );
               })}
             </div>
 
-            {/* ── Barra de busca + controles ── */}
-            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
-              <div style={{ position: "relative", flex: "1 1 300px", maxWidth: 380 }}>
-                <span style={{
-                  position: "absolute", left: 11, top: "50%",
-                  transform: "translateY(-50%)",
-                  color: "#5b6b80", fontSize: 13, pointerEvents: "none",
-                }}>🔍</span>
-                <input
-                  type="text"
-                  placeholder="Buscar por usuário, IP ou detalhe..."
-                  value={logSearch}
-                  onChange={(e) => setLogSearch(e.target.value)}
-                  style={{
-                    width: "100%", padding: "8px 12px 8px 34px",
-                    background: "rgba(255,255,255,0.03)",
-                    border: "1px solid rgba(255,255,255,0.07)",
-                    borderRadius: 9, color: "#d0d8e4", fontSize: 12,
-                    outline: "none", boxSizing: "border-box",
-                  }}
-                />
-                {logSearch && (
-                  <button
-                    onClick={() => setLogSearch("")}
+            {/* ── Painel de filtros ── */}
+            <div style={{
+              background: "rgba(255,255,255,0.018)",
+              border: "1px solid rgba(255,255,255,0.06)",
+              borderRadius: 12, padding: "14px 16px",
+              marginBottom: 14, display: "flex", flexDirection: "column", gap: 10,
+            }}>
+
+              {/* Linha 1: busca + atualizar */}
+              <div style={{ display: "flex", gap: 10 }}>
+                <div style={{ position: "relative", flex: 1 }}>
+                  <span style={{
+                    position: "absolute", left: 11, top: "50%",
+                    transform: "translateY(-50%)",
+                    color: "#5b6b80", fontSize: 13, pointerEvents: "none",
+                  }}>🔍</span>
+                  <input
+                    type="text"
+                    placeholder="Buscar usuário, IP ou detalhe..."
+                    value={logSearch}
+                    onChange={(e) => setLogSearch(e.target.value)}
                     style={{
+                      width: "100%", padding: "8px 32px 8px 34px",
+                      background: "rgba(255,255,255,0.04)",
+                      border: "1px solid rgba(255,255,255,0.09)",
+                      borderRadius: 8, color: "#d0d8e4", fontSize: 12,
+                      outline: "none", boxSizing: "border-box",
+                    }}
+                  />
+                  {logSearch && (
+                    <button onClick={() => setLogSearch("")} style={{
                       position: "absolute", right: 9, top: "50%",
                       transform: "translateY(-50%)",
                       background: "none", border: "none",
                       color: "#5b6b80", cursor: "pointer", fontSize: 14, padding: 0,
-                    }}
-                  >✕</button>
-                )}
+                    }}>✕</button>
+                  )}
+                </div>
+                <button
+                  onClick={() => { loadLogs(); setLogSearch(""); setLogFilter("ALL"); setLogDateFilter("ALL"); }}
+                  style={btnGhostStyle}
+                  title="Recarregar logs e limpar filtros"
+                >
+                  ↻ Atualizar
+                </button>
               </div>
 
-              {/* Indicador de filtro ativo */}
-              {logFilter !== "ALL" && (
-                <div style={{
-                  display: "flex", alignItems: "center", gap: 6,
-                  background: LOG_CFG[logFilter]?.bg,
-                  border: `1px solid ${LOG_CFG[logFilter]?.color}40`,
-                  borderRadius: 7, padding: "5px 10px",
-                }}>
-                  <span style={{ fontSize: 11, color: LOG_CFG[logFilter]?.color, fontWeight: 600 }}>
-                    {LOG_CFG[logFilter]?.icon} {LOG_CFG[logFilter]?.label}
-                  </span>
-                  <button
-                    onClick={() => setLogFilter("ALL")}
-                    style={{ background: "none", border: "none", color: LOG_CFG[logFilter]?.color, cursor: "pointer", fontSize: 12, padding: 0 }}
-                    title="Remover filtro"
-                  >✕</button>
-                </div>
-              )}
+              {/* Linha 2: filtros por tipo + data + contagem + limpar */}
+              <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
 
-              <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
-                <span style={{ fontSize: 11, color: "#5b6b80" }}>
-                  {filteredLogs.length} de {logCounts.ALL} evento(s)
-                </span>
-                <button
-                  onClick={() => { loadLogs(); setLogSearch(""); }}
-                  style={btnGhostStyle}
-                  title="Atualizar logs"
-                >
-                  &#x21BB; Atualizar
-                </button>
+                {/* Label */}
+                <span style={{
+                  fontSize: 10, color: "#3d4a5c", fontWeight: 700,
+                  textTransform: "uppercase", letterSpacing: "0.06em",
+                  marginRight: 2,
+                }}>Tipo</span>
+
+                {/* Pills de tipo */}
+                {[{ key: "ALL", label: "Todos", color: "#7f8ea3", icon: "≡" },
+                  ...LOG_TYPES_ORDER.map((t) => ({ key: t, ...LOG_CFG[t] }))
+                ].map(({ key, label, color, icon }) => {
+                  const active = logFilter === key;
+                  return (
+                    <button
+                      key={key}
+                      onClick={() => setLogFilter(active && key !== "ALL" ? "ALL" : key)}
+                      style={{
+                        display: "inline-flex", alignItems: "center", gap: 4,
+                        padding: "4px 11px", borderRadius: 20,
+                        border: `1px solid ${active ? color + "55" : "rgba(255,255,255,0.07)"}`,
+                        background: active ? color + "18" : "rgba(255,255,255,0.03)",
+                        color: active ? color : "#7f8ea3",
+                        fontSize: 11, fontWeight: 600, cursor: "pointer",
+                        transition: "all 0.15s", whiteSpace: "nowrap",
+                      }}
+                    >
+                      <span style={{ fontSize: 10 }}>{icon}</span>
+                      {label}
+                      {active && key !== "ALL" && (
+                        <span style={{ fontSize: 9, opacity: 0.7 }}>✕</span>
+                      )}
+                    </button>
+                  );
+                })}
+
+                {/* Separador */}
+                <div style={{ width: 1, height: 18, background: "rgba(255,255,255,0.07)", margin: "0 4px" }} />
+
+                {/* Label período */}
+                <span style={{
+                  fontSize: 10, color: "#3d4a5c", fontWeight: 700,
+                  textTransform: "uppercase", letterSpacing: "0.06em",
+                  marginRight: 2,
+                }}>Período</span>
+
+                {/* Pills de período */}
+                {[
+                  { key: "ALL",   label: "Tudo"   },
+                  { key: "TODAY", label: "Hoje"   },
+                  { key: "7D",    label: "7 dias" },
+                  { key: "30D",   label: "30 dias" },
+                ].map(({ key, label }) => {
+                  const active = logDateFilter === key;
+                  return (
+                    <button
+                      key={key}
+                      onClick={() => setLogDateFilter(key)}
+                      style={{
+                        padding: "4px 11px", borderRadius: 20,
+                        border: `1px solid ${active ? "#818cf855" : "rgba(255,255,255,0.07)"}`,
+                        background: active ? "rgba(129,140,248,0.14)" : "rgba(255,255,255,0.03)",
+                        color: active ? "#a5b4fc" : "#7f8ea3",
+                        fontSize: 11, fontWeight: 600, cursor: "pointer",
+                        transition: "all 0.15s",
+                      }}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+
+                {/* Contagem + limpar — ficam no final */}
+                <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
+                  <span style={{ fontSize: 11, color: "#5b6b80" }}>
+                    {filteredLogs.length === logCounts.ALL
+                      ? `${filteredLogs.length} evento(s)`
+                      : <><span style={{ color: "#d0d8e4", fontWeight: 600 }}>{filteredLogs.length}</span> de {logCounts.ALL}</>
+                    }
+                  </span>
+                  {(logFilter !== "ALL" || logDateFilter !== "ALL" || logSearch) && (
+                    <button
+                      onClick={() => { setLogFilter("ALL"); setLogDateFilter("ALL"); setLogSearch(""); }}
+                      style={{
+                        ...btnGhostStyle,
+                        fontSize: 10, padding: "3px 10px",
+                        color: "#f87171", borderColor: "rgba(248,113,113,0.25)",
+                      }}
+                    >
+                      ✕ Limpar filtros
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
 
@@ -468,6 +536,11 @@ export default function AdminPanel({ onBack }) {
                 border: "1px solid rgba(255,255,255,0.05)",
                 borderRadius: 14, overflow: "hidden",
               }}>
+                {usersError && (
+                  <div style={{ padding: "10px 18px", background: "rgba(248,113,113,0.08)", color: "#f87171", fontSize: 12 }}>
+                    {usersError}
+                  </div>
+                )}
                 {usersLoading ? (
                   <div style={{ padding: 32, textAlign: "center", color: "#5b6b80", fontSize: 12 }}>Carregando...</div>
                 ) : users.length === 0 ? (
@@ -502,18 +575,48 @@ export default function AdminPanel({ onBack }) {
                         </div>
                       </div>
                       {u.username !== session?.username ? (
-                        <button
-                          onClick={() => handleDelete(u.username)}
-                          style={{
-                            background: "rgba(248,113,113,0.06)",
-                            border: "1px solid rgba(248,113,113,0.15)",
-                            borderRadius: 7, padding: "5px 11px",
-                            cursor: "pointer", color: "#f87171",
-                            fontSize: 11, fontWeight: 600, transition: "all 0.15s",
-                          }}
-                        >
-                          Excluir
-                        </button>
+                        deleteConfirm === u.username ? (
+                          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                            <span style={{ fontSize: 10, color: "#f87171" }}>Confirmar?</span>
+                            <button
+                              onClick={() => handleDelete(u.username)}
+                              style={{
+                                background: "rgba(248,113,113,0.15)",
+                                border: "1px solid rgba(248,113,113,0.3)",
+                                borderRadius: 7, padding: "4px 10px",
+                                cursor: "pointer", color: "#f87171",
+                                fontSize: 11, fontWeight: 700,
+                              }}
+                            >
+                              Sim
+                            </button>
+                            <button
+                              onClick={() => setDeleteConfirm(null)}
+                              style={{
+                                background: "rgba(255,255,255,0.04)",
+                                border: "1px solid rgba(255,255,255,0.08)",
+                                borderRadius: 7, padding: "4px 10px",
+                                cursor: "pointer", color: "#7f8ea3",
+                                fontSize: 11, fontWeight: 600,
+                              }}
+                            >
+                              Não
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={() => setDeleteConfirm(u.username)}
+                            style={{
+                              background: "rgba(248,113,113,0.06)",
+                              border: "1px solid rgba(248,113,113,0.15)",
+                              borderRadius: 7, padding: "5px 11px",
+                              cursor: "pointer", color: "#f87171",
+                              fontSize: 11, fontWeight: 600, transition: "all 0.15s",
+                            }}
+                          >
+                            Excluir
+                          </button>
+                        )
                       ) : (
                         <span style={{ fontSize: 10, color: "#3d4a5c", padding: "5px 10px" }}>—</span>
                       )}
@@ -697,13 +800,6 @@ export default function AdminPanel({ onBack }) {
         )}
       </div>
 
-      <style>{`
-        @keyframes fadeIn { from{opacity:0;transform:translateY(4px)} to{opacity:1;transform:translateY(0)} }
-        *{box-sizing:border-box}
-        ::-webkit-scrollbar{height:5px;width:5px}
-        ::-webkit-scrollbar-track{background:transparent}
-        ::-webkit-scrollbar-thumb{background:#2a2a3a;border-radius:3px}
-      `}</style>
     </div>
   );
 }

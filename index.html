@@ -5,9 +5,27 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Painel de Limpeza</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧹</text></svg>" />
+    <!-- Fonte carregada UMA VEZ, no lugar correto (head), antes de qualquer render -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
     <style>
       *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
       body { background: #080810; overflow-x: hidden; }
+
+      /* Animações globais — acessíveis por todos os componentes desde o primeiro render */
+      @keyframes slideUp   { from { opacity: 0; transform: translateY(8px)  } to { opacity: 1; transform: translateY(0) } }
+      @keyframes slideDown { from { opacity: 0; transform: translateY(-8px) } to { opacity: 1; transform: translateY(0) } }
+      @keyframes fadeIn    { from { opacity: 0; transform: translateY(4px)  } to { opacity: 1; transform: translateY(0) } }
+      @keyframes spin      { to   { transform: rotate(360deg) } }
+
+      /* Scrollbar global */
+      ::-webkit-scrollbar         { height: 5px; width: 5px; }
+      ::-webkit-scrollbar-track   { background: transparent; }
+      ::-webkit-scrollbar-thumb   { background: #2a2a3a; border-radius: 3px; }
+
+      /* Cor de fundo de options em selects (dark theme) */
+      select option { background: #151520; color: #d0d8e4; }
     </style>
   </head>
   <body>

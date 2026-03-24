@@ -62,17 +62,8 @@ function formatExecDateShort(str) {
   if (iso) return `${iso[3]}/${iso[2]}/${iso[1]}`;
   return str.split(" ")[0]; // DD/MM/YYYY já formatado
 }
-
-function parseExecDate(str) {
-  if (!str) return null;
-  // Formato DD/MM/YYYY ou D/M/YYYY  (ex: "06/03/2026 12:00:01")
-  let m = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-  if (m) return new Date(parseInt(m[3]), parseInt(m[2]) - 1, parseInt(m[1]), 0, 0, 0, 0);
-  // Formato ISO YYYY-MM-DD  (ex: "2026-03-06 12:00:01" ou "2026-03-06T12:00:01")
-  m = str.match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (m) return new Date(parseInt(m[1]), parseInt(m[2]) - 1, parseInt(m[3]), 0, 0, 0, 0);
-  return null;
-}
+// parseExecDate foi movida para useApiData.js e agora é pré-calculada em normalize()
+// como d.execDate — sem regex extra por render.
 
 // Compara apenas a parte da data (ignora horário e DST)
 function dateOnOrAfter(execDate, refDate) {
@@ -105,10 +96,12 @@ export default function App({ onAdminClick = null }) {
   const [filterLocal, setFilterLocal] = useState("TODOS");
   const [filterSemana, setFilterSemana] = useState("TODOS");
 
-  // Datas programadas (1ª e 3ª sexta do mês) — calculadas uma vez por sessão
-  const lastScheduled = getMostRecentScheduled(new Date());
-  const nextScheduled = getNextScheduled(new Date());
+  // Datas programadas — computadas UMA VEZ no mount (new Date() sem memo recria a cada render)
+  const today         = useMemo(() => new Date(), []);
+  const lastScheduled = useMemo(() => getMostRecentScheduled(today), [today]);
+  const nextScheduled = useMemo(() => getNextScheduled(today), [today]);
   const [selectedRow, setSelectedRow] = useState(null);
+  const [hoveredRow, setHoveredRow] = useState(null);
   const [sortCol, setSortCol] = useState(null);
   const [sortDir, setSortDir] = useState("asc");
 
@@ -132,13 +125,12 @@ export default function App({ onAdminClick = null }) {
         d.email.toLowerCase().includes(q);
       const mh = filterSaude === "TODOS" || d.saude === filterSaude;
       const ml = filterLocal === "TODOS" || d.localizacao === filterLocal;
-      const execDate = parseExecDate(d.ultima_execucao);
       const mSemana =
         filterSemana === "TODOS"
           ? true
           : filterSemana === "RODARAM"
-          ? dateOnOrAfter(execDate, lastScheduled)
-          : !dateOnOrAfter(execDate, lastScheduled);
+          ? dateOnOrAfter(d.execDate, lastScheduled)
+          : !dateOnOrAfter(d.execDate, lastScheduled);
       return ms && mh && ml && mSemana;
     });
     if (sortCol) {
@@ -169,16 +161,14 @@ export default function App({ onAdminClick = null }) {
 
 
   const semanaExec = useMemo(() => {
-    const rodaram = data.filter((d) =>
-      dateOnOrAfter(parseExecDate(d.ultima_execucao), lastScheduled)
-    );
-    const naoRodaram = data.filter(
-      (d) => !dateOnOrAfter(parseExecDate(d.ultima_execucao), lastScheduled)
-    );
-    const pct =
-      data.length > 0 ? Math.round((rodaram.length / data.length) * 100) : 0;
+    // Passagem única: d.execDate já está pré-parseado pelo normalize()
+    const rodaram = [], naoRodaram = [];
+    for (const d of data) {
+      (dateOnOrAfter(d.execDate, lastScheduled) ? rodaram : naoRodaram).push(d);
+    }
+    const pct = data.length > 0 ? Math.round((rodaram.length / data.length) * 100) : 0;
     return { rodaram, naoRodaram, pct };
-  }, [data]);
+  }, [data, lastScheduled]);
 
 
   const handleSort = (col) => {
@@ -200,11 +190,6 @@ export default function App({ onAdminClick = null }) {
         fontFamily: "'IBM Plex Sans','Segoe UI',system-ui,sans-serif",
       }}
     >
-      <link
-        href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap"
-        rel="stylesheet"
-      />
-
       {/* ---- HEADER ---- */}
       <header
         style={{
@@ -245,7 +230,7 @@ export default function App({ onAdminClick = null }) {
               Painel de Limpeza
             </h1>
             <span style={{ fontSize: 11, color: "#5b6b80" }}>
-              Monitoramento em tempo real &middot; limpeza_3_0.bat
+              Monitoramento em tempo real
             </span>
           </div>
         </div>
@@ -555,9 +540,9 @@ export default function App({ onAdminClick = null }) {
                 </span>
               </div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-                {semanaExec.rodaram.slice(0, 12).map((d, i) => (
+                {semanaExec.rodaram.slice(0, 12).map((d) => (
                   <span
-                    key={i}
+                    key={d.asset_tag || d.hostname}
                     title={`${d.colaborador} · ${d.ultima_execucao}`}
                     style={{
                       fontSize: 9,
@@ -638,9 +623,9 @@ export default function App({ onAdminClick = null }) {
                 </span>
               </div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-                {semanaExec.naoRodaram.slice(0, 12).map((d, i) => (
+                {semanaExec.naoRodaram.slice(0, 12).map((d) => (
                   <span
-                    key={i}
+                    key={d.asset_tag || d.hostname}
                     title={
                       d.ultima_execucao
                         ? `${d.colaborador} · última: ${d.ultima_execucao}`
@@ -834,7 +819,7 @@ export default function App({ onAdminClick = null }) {
               <tbody>
                 {filtered.map((d, i) => (
                   <tr
-                    key={d.asset_tag + "-" + i}
+                    key={d.asset_tag || i}
                     onClick={() => setSelectedRow(selectedRow === i ? null : i)}
                     style={{
                       borderBottom: "1px solid rgba(255,255,255,0.025)",
@@ -842,18 +827,13 @@ export default function App({ onAdminClick = null }) {
                       background:
                         selectedRow === i
                           ? "rgba(99,102,241,0.05)"
+                          : hoveredRow === i
+                          ? "rgba(255,255,255,0.015)"
                           : "transparent",
                       transition: "background 0.1s",
                     }}
-                    onMouseEnter={(e) => {
-                      if (selectedRow !== i)
-                        e.currentTarget.style.background =
-                          "rgba(255,255,255,0.015)";
-                    }}
-                    onMouseLeave={(e) => {
-                      if (selectedRow !== i)
-                        e.currentTarget.style.background = "transparent";
-                    }}
+                    onMouseEnter={() => setHoveredRow(i)}
+                    onMouseLeave={() => setHoveredRow(null)}
                   >
                     <td
                       style={{
@@ -904,10 +884,7 @@ export default function App({ onAdminClick = null }) {
                     {/* Período — compliance com a janela atual */}
                     <td style={{ padding: "11px 14px" }}>
                       {(() => {
-                        const noPeriodo = dateOnOrAfter(
-                          parseExecDate(d.ultima_execucao),
-                          lastScheduled
-                        );
+                        const noPeriodo = dateOnOrAfter(d.execDate, lastScheduled);
                         if (noPeriodo)
                           return (
                             <span style={periodoBadge("#34d399")}>✓ No período</span>
@@ -1107,7 +1084,7 @@ export default function App({ onAdminClick = null }) {
           }}
         >
           <span style={{ fontSize: 10, color: "#3d4a5c" }}>
-            Script: limpeza_3_0.bat &middot; Refresh: {REFRESH_INTERVAL / 1000}s
+            Script: limpeza_2_0.bat &middot; Refresh: {REFRESH_INTERVAL / 1000}s
           </span>
           <span style={{ fontSize: 10, color: "#3d4a5c" }}>
             Fonte: {source === "api" ? "API (online)" : "dados locais (offline)"}
@@ -1115,17 +1092,6 @@ export default function App({ onAdminClick = null }) {
         </div>
       </div>
 
-      <style>{`
-        @keyframes slideUp { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
-        @keyframes slideDown { from{opacity:0;transform:translateY(-8px)} to{opacity:1;transform:translateY(0)} }
-        @keyframes fadeIn { from{opacity:0} to{opacity:1} }
-        @keyframes spin { to{transform:rotate(360deg)} }
-        *{box-sizing:border-box}
-        ::-webkit-scrollbar{height:5px}
-        ::-webkit-scrollbar-track{background:transparent}
-        ::-webkit-scrollbar-thumb{background:#2a2a3a;border-radius:3px}
-        select option{background:#151520;color:#d0d8e4}
-      `}</style>
     </div>
   );
 }

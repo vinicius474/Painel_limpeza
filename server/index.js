@@ -15,12 +15,13 @@ import "dotenv/config";
 
 import { initUsers, findUser, listUsers, createUser, deleteUser } from "./lib/users.js";
 import { addLog, getLogs, LOG_TYPES } from "./lib/logger.js";
+import { initDb } from "./lib/db.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);
 
 // ── Validação de variáveis de ambiente obrigatórias ───────────────────────────
-const ALWAYS_REQUIRED = ["JWT_SECRET", "WEBHOOK_URL"];
+const ALWAYS_REQUIRED = ["JWT_SECRET", "WEBHOOK_URL", "DB_HOST", "DB_NAME", "DB_USER", "DB_PASSWORD"];
 const missingAlways = ALWAYS_REQUIRED.filter((k) => !process.env[k]);
 if (missingAlways.length > 0) {
   console.error("[FATAL] Variáveis obrigatórias ausentes:", missingAlways.join(", "));
@@ -38,7 +39,7 @@ const PORT    = Number(process.env.PORT) || 3001;
 const IS_PROD = process.env.NODE_ENV === "production";
 
 // ── Inicialização de usuários ─────────────────────────────────────────────────
-// Monta seed a partir do .env (usado apenas na PRIMEIRA execução para criar users.json)
+// Monta seed a partir do .env (usado apenas na PRIMEIRA execução, quando a tabela users está vazia)
 const seedUsers = [];
 if (process.env.ADMIN_USERNAME && process.env.ADMIN_PASSWORD_HASH) {
   seedUsers.push({
@@ -54,8 +55,6 @@ if (process.env.VIEWER_USERNAME && process.env.VIEWER_PASSWORD_HASH) {
     role:        "viewer",
   });
 }
-initUsers(seedUsers); // cria users.json se não existir; usa seed apenas na 1ª vez
-
 // ── Hash dummy para comparação com timing constante ───────────────────────────
 // Gerado com top-level await (ESM) para garantir formato 100% válido.
 // Impede enumeração de usuários por diferença de tempo na resposta de login.
@@ -183,7 +182,7 @@ app.post("/auth/login", loginLimiter, async (req, res) => {
     return res.status(400).json({ error: "Credenciais inválidas." });
   }
 
-  const user = findUser(username);
+  const user = await findUser(username);
   const hashToCompare = user?.passwordHash ?? TIMING_DUMMY_HASH;
   const valid = await bcrypt.compare(password, hashToCompare);
 
@@ -225,14 +224,14 @@ app.get("/api/painel", requireAuth, apiLimiter, async (req, res) => {
 });
 
 // ── GET /admin/logs ───────────────────────────────────────────────────────────
-app.get("/admin/logs", requireAuth, requireRole("admin"), adminLimiter, (req, res) => {
+app.get("/admin/logs", requireAuth, requireRole("admin"), adminLimiter, async (req, res) => {
   const { limit, type } = req.query;
-  return res.json(getLogs({ limit, type }));
+  return res.json(await getLogs({ limit, type }));
 });
 
 // ── GET /admin/users ──────────────────────────────────────────────────────────
-app.get("/admin/users", requireAuth, requireRole("admin"), adminLimiter, (_req, res) => {
-  return res.json(listUsers());
+app.get("/admin/users", requireAuth, requireRole("admin"), adminLimiter, async (_req, res) => {
+  return res.json(await listUsers());
 });
 
 // ── POST /admin/users ─────────────────────────────────────────────────────────
@@ -254,6 +253,7 @@ app.post("/admin/users", requireAuth, requireRole("admin"), adminLimiter, async 
 
   try {
     const newUser = await createUser(username, password, role, req.user.sub);
+
     addLog(LOG_TYPES.USER_CREATED, username, req.ip, `criado por ${req.user.sub} (${role})`);
     console.log(`[admin] Usuário criado: "${username}" role="${role}" por "${req.user.sub}"`);
     return res.status(201).json(newUser);
@@ -263,10 +263,10 @@ app.post("/admin/users", requireAuth, requireRole("admin"), adminLimiter, async 
 });
 
 // ── DELETE /admin/users/:username ─────────────────────────────────────────────
-app.delete("/admin/users/:username", requireAuth, requireRole("admin"), adminLimiter, (req, res) => {
+app.delete("/admin/users/:username", requireAuth, requireRole("admin"), adminLimiter, async (req, res) => {
   const { username } = req.params;
   try {
-    deleteUser(username, req.user.sub);
+    await deleteUser(username, req.user.sub);
     addLog(LOG_TYPES.USER_DELETED, username, req.ip, `excluído por ${req.user.sub}`);
     console.log(`[admin] Usuário excluído: "${username}" por "${req.user.sub}"`);
     return res.json({ ok: true });
@@ -329,24 +329,40 @@ app.use((err, _req, res, _next) => {
 });
 
 // ── Start ─────────────────────────────────────────────────────────────────────
-const server = app.listen(PORT, "0.0.0.0", () => {
-  console.log(`[server] Painel de Limpeza iniciado na porta ${PORT}`);
-  console.log(`[server] Ambiente: ${process.env.NODE_ENV || "development"}`);
-});
+let server;
 
-server.on("error", (err) => {
-  if (err.code === "EADDRINUSE") {
-    console.error(`[FATAL] Porta ${PORT} já está em uso.`);
-  } else {
-    console.error("[FATAL] Erro ao iniciar servidor:", err.message);
-  }
+async function start() {
+  // 1. Inicializa banco e cria tabelas
+  await initDb();
+
+  // 2. Popula usuários iniciais (apenas se a tabela estiver vazia)
+  await initUsers(seedUsers);
+
+  // 3. Sobe o servidor HTTP
+  server = app.listen(PORT, "0.0.0.0", () => {
+    console.log(`[server] Painel de Limpeza iniciado na porta ${PORT}`);
+    console.log(`[server] Ambiente: ${process.env.NODE_ENV || "development"}`);
+  });
+
+  server.on("error", (err) => {
+    if (err.code === "EADDRINUSE") {
+      console.error(`[FATAL] Porta ${PORT} já está em uso.`);
+    } else {
+      console.error("[FATAL] Erro ao iniciar servidor:", err.message);
+    }
+    process.exit(1);
+  });
+}
+
+start().catch((err) => {
+  console.error("[FATAL] Falha na inicialização:", err.message);
   process.exit(1);
 });
 
 // ── Graceful shutdown ─────────────────────────────────────────────────────────
 function shutdown(signal) {
   console.log(`[server] ${signal} recebido. Encerrando...`);
-  server.close(() => { console.log("[server] Encerrado."); process.exit(0); });
+  if (server) server.close(() => { console.log("[server] Encerrado."); process.exit(0); });
   setTimeout(() => { console.error("[server] Timeout. Forçando saída."); process.exit(1); }, 10_000).unref();
 }
 process.on("SIGTERM", () => shutdown("SIGTERM"));

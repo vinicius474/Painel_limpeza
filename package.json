@@ -13,7 +13,9 @@
     "build": "vite build",
     "preview": "vite preview",
     "start": "node server/index.js",
-    "hash-password": "node scripts/hash-password.js"
+    "hash-password": "node scripts/hash-password.js",
+    "migrate": "node scripts/migrate-json-to-mysql.js",
+    "setup": "npm install && npm run build"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
@@ -23,6 +25,7 @@
     "express-rate-limit": "^7.4.0",
     "helmet": "^8.0.0",
     "jsonwebtoken": "^9.0.2",
+    "mysql2": "^3.20.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "recharts": "^2.12.7"
